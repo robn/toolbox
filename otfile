@@ -1,0 +1,105 @@
+#!/usr/bin/env perl
+
+use 5.010;
+
+use warnings;
+use strict;
+
+my @preferred_interfaces = qw(eth0 wlan0);
+my $port = 5238;
+
+use autodie;
+
+use File::MMagic;
+use File::Basename;
+use File::stat;
+use UUID::Tiny;
+use Sys::HostIP;
+use URI::Escape;
+use Term::ProgressBar;
+
+use base "HTTP::Server::Simple";
+
+say "usage: otfile <file>" and exit 1 if @ARGV != 1;
+
+my ($file) = @ARGV;
+
+open my $fh, "<", $file; close $fh;
+
+my $mm = File::MMagic->new;
+my $type = $mm->checktype_filename($file);
+
+my $size = (stat $file)->size;
+
+my $fileonly = fileparse($file);
+
+my $uuid = create_UUID_as_string(UUID_V4);
+
+say "I: serving '$file' as '$fileonly', size $size, type $type";
+
+my $server = __PACKAGE__->new($port);
+
+my $interfaces = Sys::HostIP->interfaces;
+my ($ip) = grep { defined } (@{$interfaces}{@preferred_interfaces}, Sys::HostIP->ip);
+
+my $path = "/$uuid/".uri_escape($fileonly);
+my $url = "http://$ip:$port$path";
+
+say "I: url is: $url";
+
+$server->run;
+
+my $error;
+
+sub setup {
+    my ($self, %args) = @_;
+
+    say STDERR "I: request from $args{peername}";
+
+    if ($args{path} ne $path) {
+        $error = "403 Forbidden";
+        say STDERR "E: invalid request for $args{path}";
+    }
+}
+
+sub handler {
+    my ($self) = @_;
+
+    if ($error) {
+        say "HTTP/1.0 $error";
+        say "Pragma: no-cache";
+        say "";
+        return;
+    }
+
+    open my $fh, "<", $file;
+
+    say "HTTP/1.0 200 OK";
+    say "Pragma: no-cache";
+    say "Content-type: $type";
+    say "Content-length: $size";
+    say "Content-disposition: inline; filename=\"$fileonly\"";
+    say "";
+
+    my $p = Term::ProgressBar->new({
+        name => $fileonly,
+        count => $size,
+        ETA => "linear",
+    });
+    $p->minor(0);
+
+    my $total = 0;
+    while (my $len = sysread $fh, my $buf, 4096) {
+        print $buf;
+        $total += $len;
+        $p->update($total);
+    }
+
+    $p->update($size);
+
+    close $fh;
+
+    exit;
+}
+
+sub print_banner {}
